@@ -39,7 +39,7 @@ COL = {
 # 擷取策略
 # =============================================================================
 # 每次執行最多處理幾筆 (GitHub Actions 建議 100，本地可調高)
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "100"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "250"))
 
 # 每筆之間的延遲秒數 (禮貌爬蟲)
 REQUEST_DELAY = 1.5

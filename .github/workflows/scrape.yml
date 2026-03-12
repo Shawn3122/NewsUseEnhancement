@@ -3,13 +3,20 @@ name: Daily News Scraper
 on:
   schedule:
     # ===================================================================
-    # 排程設定 (UTC 時間)
+    # 排程設定 (UTC 時間，UTC+8 = 台北時間)
     #
-    # 工作 1 — 匯出備份：UTC 19:00 = UTC+8 03:00 (在 GAS dailyClean 04:00 之前)
-    # 工作 2 — 擷取全文：UTC 00:00 = UTC+8 08:00 (每天早上處理前一天的新聞)
+    # 備份：UTC 19:00 = UTC+8 03:00 (在 GAS dailyClean 04:00 之前)
+    # 擷取：每日 3 次，間隔 8 小時，加速消化積壓
+    #   UTC 00:00 = UTC+8 08:00 (早上)
+    #   UTC 08:00 = UTC+8 16:00 (下午)
+    #   UTC 14:00 = UTC+8 22:00 (晚上)
+    #
+    # 預估月用量: ~960/2000 分鐘 (48%)，積壓清完後可降為 1 次/天
     # ===================================================================
-    - cron: '0 19 * * *'   # 備份: 每天 UTC+8 03:00
-    - cron: '0 0 * * *'    # 擷取: 每天 UTC+8 08:00
+    - cron: '0 19 * * *'   # 備份
+    - cron: '0 0 * * *'    # 擷取 #1 (08:00 台北)
+    - cron: '0 8 * * *'    # 擷取 #2 (16:00 台北)
+    - cron: '0 14 * * *'   # 擷取 #3 (22:00 台北)
 
   # 手動觸發 (測試用)
   workflow_dispatch:
@@ -66,6 +73,8 @@ jobs:
   fetch:
     if: >-
       github.event.schedule == '0 0 * * *' ||
+      github.event.schedule == '0 8 * * *' ||
+      github.event.schedule == '0 14 * * *' ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -88,7 +97,7 @@ jobs:
             echo "batch_size=${{ github.event.inputs.batch_size }}" >> $GITHUB_OUTPUT
           else
             echo "action=fetch" >> $GITHUB_OUTPUT
-            echo "batch_size=100" >> $GITHUB_OUTPUT
+            echo "batch_size=250" >> $GITHUB_OUTPUT
           fi
 
       - name: Run scraper
