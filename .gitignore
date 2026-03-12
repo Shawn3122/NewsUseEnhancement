@@ -1,0 +1,24 @@
+# 認證與敏感資料
+service_account.json
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 匯出資料 (透過 GitHub Artifacts 保存，不進 repo)
+exports/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 原始資料檔 (太大不適合進 repo)
+*.xlsx
+GoogleAppsScript_Get_Recently_News_with_Keywords.txt

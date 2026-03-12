@@ -1,0 +1,123 @@
+name: Daily News Scraper
+
+on:
+  schedule:
+    # ===================================================================
+    # 排程設定 (UTC 時間)
+    #
+    # 工作 1 — 匯出備份：UTC 19:00 = UTC+8 03:00 (在 GAS dailyClean 04:00 之前)
+    # 工作 2 — 擷取全文：UTC 00:00 = UTC+8 08:00 (每天早上處理前一天的新聞)
+    # ===================================================================
+    - cron: '0 19 * * *'   # 備份: 每天 UTC+8 03:00
+    - cron: '0 0 * * *'    # 擷取: 每天 UTC+8 08:00
+
+  # 手動觸發 (測試用)
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '執行動作'
+        required: true
+        default: 'fetch'
+        type: choice
+        options:
+          - fetch
+          - export
+          - report-only
+      batch_size:
+        description: '批次大小'
+        required: false
+        default: '100'
+
+jobs:
+  # =================================================================
+  # 工作 1：匯出備份 (只在 03:00 排程觸發)
+  # =================================================================
+  export:
+    if: github.event.schedule == '0 19 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Export Sheet to Excel
+        run: python main.py --no-fetch --export
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+
+      - name: Upload export as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-export-${{ github.run_id }}
+          path: exports/
+          retention-days: 90
+
+  # =================================================================
+  # 工作 2：擷取全文 (每天 08:00 或手動觸發)
+  # =================================================================
+  fetch:
+    if: >-
+      github.event.schedule == '0 0 * * *' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine action
+        id: action
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "action=${{ github.event.inputs.action }}" >> $GITHUB_OUTPUT
+            echo "batch_size=${{ github.event.inputs.batch_size }}" >> $GITHUB_OUTPUT
+          else
+            echo "action=fetch" >> $GITHUB_OUTPUT
+            echo "batch_size=100" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run scraper
+        if: steps.action.outputs.action == 'fetch'
+        run: python main.py --batch-size ${{ steps.action.outputs.batch_size }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+
+      - name: Run export only
+        if: steps.action.outputs.action == 'export'
+        run: python main.py --no-fetch --export
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+
+      - name: Run report only
+        if: steps.action.outputs.action == 'report-only'
+        run: python main.py --report-only
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+
+      - name: Upload export artifact (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-export-manual-${{ github.run_id }}
+          path: exports/
+          retention-days: 90
+          if-no-files-found: ignore
