@@ -21,6 +21,7 @@ from trafilatura.settings import use_config
 import urllib3
 
 import config
+import content_cleaner
 
 # 關閉 SSL 警告 (部分政府網站憑證有問題)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -301,9 +302,9 @@ def scrape_url(url: str) -> ScrapeResult:
 
         if attempt.success:
             result.success = True
-            result.text = attempt.text
+            result.text = content_cleaner.clean_content(attempt.text)
             result.method = attempt.method
-            result.char_count = attempt.char_count
+            result.char_count = len(result.text)
             return result
 
         # 如果是確定無法重試的錯誤 (404)，提前結束不繼續嘗試
