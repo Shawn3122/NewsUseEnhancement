@@ -95,6 +95,7 @@ def get_pending_rows(batch_size: int = config.BATCH_SIZE) -> list[dict]:
         })
 
     # 排序：PENDING 優先，然後 RETRY_1 > RETRY_2 > RETRY_3
+    # 使用大寫確保與 Google Sheets 實際寫入的狀態值一致
     priority = {config.STATUS_PENDING: 0, "RETRY_1": 1, "RETRY_2": 2, "RETRY_3": 3}
     rows.sort(key=lambda r: priority.get(r["status"], 99))
 
@@ -104,6 +105,13 @@ def get_pending_rows(batch_size: int = config.BATCH_SIZE) -> list[dict]:
 # =============================================================================
 # 寫入
 # =============================================================================
+
+def _truncate_if_needed(field_name: str, value: str) -> str:
+    """對內文等大欄位截斷，避免超出 Google Sheets 上限。"""
+    if field_name == "內文" and len(value) > config.MAX_CONTENT_LENGTH:
+        return value[:config.MAX_CONTENT_LENGTH]
+    return value
+
 
 def update_row(row_index: int, fields: dict) -> None:
     """
@@ -121,7 +129,9 @@ def update_row(row_index: int, fields: dict) -> None:
         col_index = config.COL.get(field_name)
         if col_index is None:
             continue
-        cell = gspread.Cell(row=row_index, col=col_index, value=str(value) if value else "")
+        str_value = str(value) if value else ""
+        str_value = _truncate_if_needed(field_name, str_value)
+        cell = gspread.Cell(row=row_index, col=col_index, value=str_value)
         cells_to_update.append(cell)
 
     if cells_to_update:
@@ -142,9 +152,11 @@ def batch_update_rows(updates: list[tuple[int, dict]]) -> None:
             col_index = config.COL.get(field_name)
             if col_index is None:
                 continue
+            str_value = str(value) if value else ""
+            str_value = _truncate_if_needed(field_name, str_value)
             cell = gspread.Cell(
                 row=row_index, col=col_index,
-                value=str(value)[:config.MAX_CONTENT_LENGTH] if value else ""
+                value=str_value,
             )
             cells_to_update.append(cell)
 

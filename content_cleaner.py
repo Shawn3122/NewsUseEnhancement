@@ -65,7 +65,7 @@ def _rule_c_social_removal(text: str) -> str:
             continue
 
         # 短詞/模糊詞：僅在文末 200 字範圍內移除
-        if line_start >= tail_start and config.SOCIAL_PATTERNS_TAIL_ONLY:
+        if config.SOCIAL_PATTERNS_TAIL_ONLY and line_start >= tail_start:
             if any(p in line for p in config.SOCIAL_PATTERNS_TAIL_ONLY):
                 continue
 

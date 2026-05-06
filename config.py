@@ -55,7 +55,7 @@ MAX_RETRIES = 3
 # 全文最大長度 (Google Sheets 單格上限 50,000 字元)
 MAX_CONTENT_LENGTH = 49000
 
-# Jina Reader API
+# Jina Reader API（結尾斜線已確保）
 JINA_BASE_URL = "https://r.jina.ai/"
 JINA_API_KEY = os.environ.get("JINA_API_KEY", "")  # 選用，有 key 可提升配額
 
@@ -125,7 +125,19 @@ SOCIAL_PATTERNS_EXACT = [
 ]
 
 # Rule C: 社群元素（短詞）— 僅文末 200 字內匹配，避免誤刪正文
-SOCIAL_PATTERNS_TAIL_ONLY: list[str] = []
+# 這些短詞太常見於正文中（如「轉發」「分享」），所以只 在文章末尾 200 字範圍內移除
+SOCIAL_PATTERNS_TAIL_ONLY: list[str] = [
+    "轉發",
+    "分享",
+    "粉絲團",
+    "LINE",
+    "LINE TODAY",
+    "©",
+    "版權所有",
+    "follow",
+    "Subscribe",
+    "訂閱",
+]
 
 # Rule D: 尾部連續列表清理的最少行數門檻
 TRAILING_LIST_MIN_LINES = 3
