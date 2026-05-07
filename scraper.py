@@ -345,18 +345,12 @@ def _try_jina_reader(url: str) -> LayerAttempt:
             attempt.elapsed_sec = time.time() - start
             return attempt
 
-        # Jina 回傳的格式：Title: ...\nURL Source: ...\nMarkdown Content:\n...
+        # Jina 回傳格式：Title/URL Source/Published Time/Markdown Content: 後才是正文
+        # 改用直接 slice，避免空白行導致 skip_header 提早失效的 bug
         raw_text = resp.text
-        # 移除 Jina metadata 行，只保留實質內容
-        lines = raw_text.split("\n")
-        content_lines = []
-        skip_header = True
-        for line in lines:
-            if skip_header and line.startswith(("Title:", "URL Source:", "Markdown Content:", "===")):
-                continue
-            skip_header = False
-            content_lines.append(line)
-        text = "\n".join(content_lines).strip()
+        _marker = "Markdown Content:"
+        _pos = raw_text.find(_marker)
+        text = raw_text[_pos + len(_marker):].strip() if _pos >= 0 else raw_text.strip()
 
         if _is_valid_content(text):
             attempt.success = True
