@@ -66,16 +66,27 @@ def _build_update_fields(
             "字數": result.char_count,
             "網域": domain,
         }
-    else:
-        next_status = _next_status_on_failure(current_status)
+
+    if result.error_type == config.ERROR_VIDEO:
         return {
-            "狀態": next_status,
-            "擷取方法": "",
+            "狀態": config.STATUS_TITLE_ONLY,
+            "內文": "",
+            "擷取方法": "video-detected",
             "診斷資訊": result.diagnostics_json(),
             "最後嘗試": now_str,
             "字數": 0,
             "網域": domain,
         }
+
+    next_status = _next_status_on_failure(current_status)
+    return {
+        "狀態": next_status,
+        "擷取方法": "",
+        "診斷資訊": result.diagnostics_json(),
+        "最後嘗試": now_str,
+        "字數": 0,
+        "網域": domain,
+    }
 
 
 # =============================================================================
