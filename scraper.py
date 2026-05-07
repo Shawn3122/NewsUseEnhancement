@@ -506,6 +506,66 @@ def _try_newtalk_amp(url: str) -> LayerAttempt:
     return attempt
 
 
+def _try_cnews_detect(url: str) -> LayerAttempt:
+    """cnews.com.tw 前置層：偵測影音頁 + 直接萃取文字文章。
+
+    - YouTube embed iframe 存在 → error_type=ERROR_VIDEO（終止所有層）
+    - 正常文章且 trafilatura 成功 → 直接回傳 success（跳過 Layer 1-4）
+    - 正常文章但 trafilatura 失敗 → error_type=ERROR_EMPTY（fallthrough 到標準層）
+    """
+    attempt = LayerAttempt(method="cnews-detect")
+    start = time.time()
+    try:
+        resp = requests.get(
+            url,
+            headers=config.BROWSER_HEADERS,
+            timeout=config.TIMEOUT_REQUESTS,
+            verify=False,
+            allow_redirects=True,
+        )
+        attempt.http_status = resp.status_code
+
+        if resp.status_code != 200:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                http_status=resp.status_code,
+                response_headers=dict(resp.headers),
+            )
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        html = resp.text
+
+        # 影音頁偵測：cnews 影音頁固定含 YouTube embed iframe
+        if re.search(r'<iframe[^>]+src=["\']https://www\.youtube\.com/embed/', html, re.I):
+            attempt.error_type = config.ERROR_VIDEO
+            attempt.error_detail = "YouTube embed 影音頁，無文字報導內文"
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        # 正常文章：直接用已下載的 HTML 萃取，避免重複請求
+        text = trafilatura.extract(
+            html,
+            output_format="txt",
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+            config=_trafil_config,
+        )
+        if _is_valid_content(text):
+            attempt.success = True
+            attempt.text = text[:config.MAX_CONTENT_LENGTH]
+            attempt.char_count = len(text)
+        else:
+            attempt.error_type = config.ERROR_EMPTY
+            attempt.error_detail = "trafilatura 萃取過短，交由標準層處理"
+
+    except Exception as e:
+        attempt.error_type, attempt.error_detail = _classify_error(e=e)
+
+    attempt.elapsed_sec = time.time() - start
+    return attempt
+
+
 # =============================================================================
 # 主要擷取函式
 # =============================================================================
@@ -522,6 +582,7 @@ _LAYERS = [
 _DOMAIN_SPECIFIC_LAYERS: dict[str, list] = {
     'newtalk.tw':     [_try_newtalk_amp],
     'chinatimes.com': [_try_chinatimes_direct],
+    'cnews.com.tw':   [_try_cnews_detect],
 }
 
 
@@ -552,6 +613,10 @@ def scrape_url(url: str) -> ScrapeResult:
 
         # 如果是確定無法重試的錯誤 (404)，提前結束不繼續嘗試
         if attempt.error_type == config.ERROR_HTTP and "404" in attempt.error_detail:
+            break
+
+        # 影音頁：確定無文字內文，不進行重試
+        if attempt.error_type == config.ERROR_VIDEO:
             break
 
     # 所有層都失敗 — 取最後一層的錯誤分類

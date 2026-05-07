@@ -86,6 +86,7 @@ ERROR_HTTP = "HTTP錯誤"
 ERROR_PAYWALL = "付費牆"
 ERROR_BLOCKED = "被封鎖"
 ERROR_UNKNOWN = "未知錯誤"
+ERROR_VIDEO = "影音頁"         # 頁面為影音 embed（YouTube 等），無文字報導內文
 
 # =============================================================================
 # 內文清洗規則 (content_cleaner.py 使用)
