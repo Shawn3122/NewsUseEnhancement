@@ -378,6 +378,80 @@ def _try_jina_reader(url: str) -> LayerAttempt:
 # Domain-specific 萃取層
 # =============================================================================
 
+def _try_chinatimes_direct(url: str) -> LayerAttempt:
+    """chinatimes.com 專用：直接萃取 itemprop="articleBody" div 內的段落。
+
+    trafilatura 在此站容易夾帶 navigation 選單文字（favor_recall=True 副作用），
+    改用 regex 精準定位 schema.org articleBody 語意標記。
+    """
+    attempt = LayerAttempt(method="chinatimes-direct")
+    start = time.time()
+    try:
+        resp = requests.get(
+            url,
+            headers=config.BROWSER_HEADERS,
+            timeout=config.TIMEOUT_REQUESTS,
+            verify=False,
+            allow_redirects=True,
+        )
+        attempt.http_status = resp.status_code
+
+        if resp.status_code != 200:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                http_status=resp.status_code,
+                response_headers=dict(resp.headers),
+            )
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        html = resp.text
+
+        # 找 itemprop="articleBody" 的起始位置（避免 regex 被巢狀 div 截斷）
+        art_start = html.find('itemprop="articleBody"')
+        if art_start < 0:
+            art_start = html.find("itemprop='articleBody'")
+        if art_start < 0:
+            attempt.error_type = config.ERROR_EMPTY
+            attempt.error_detail = "找不到 itemprop=articleBody 結構"
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        # 切出文章區域（最多往後 12000 字，遇到文章結束 comment 就截斷）
+        search_window = html[art_start:art_start + 12000]
+        end_marker = '<!--文章主體結束-->'
+        end_idx = search_window.find(end_marker)
+        article_html = search_window[:end_idx] if end_idx > 0 else search_window
+
+        # 移除嵌入式社群媒體區塊和廣告 div（避免汙染段落）
+        article_html = re.sub(r'<blockquote[^>]*>.*?</blockquote>', '', article_html, flags=re.DOTALL)
+        article_html = re.sub(r'<div[^>]+class="[^"]*(?:embed|ad\s|custom-embeded)[^"]*"[^>]*>.*?</div>', '', article_html, flags=re.DOTALL)
+        article_html = re.sub(r'<script[^>]*>.*?</script>', '', article_html, flags=re.DOTALL)
+
+        # 取出所有段落
+        noise_keywords = ['廣告', '訂閱', '登入', '會員', 'Cookie', '隱私權']
+        paragraphs = []
+        for p in re.findall(r'<p[^>]*>(.*?)</p>', article_html, re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', p)
+            text = re.sub(r'&nbsp;', ' ', text).strip()
+            if len(text) >= 20 and not any(k in text for k in noise_keywords):
+                paragraphs.append(text)
+
+        content = "\n".join(paragraphs)
+        if _is_valid_content(content):
+            attempt.success = True
+            attempt.text = content[:config.MAX_CONTENT_LENGTH]
+            attempt.char_count = len(content)
+        else:
+            attempt.error_type = config.ERROR_EMPTY
+            attempt.error_detail = f"段落萃取結果過短（{len(content)} 字）"
+
+    except Exception as e:
+        attempt.error_type, attempt.error_detail = _classify_error(e=e)
+
+    attempt.elapsed_sec = time.time() - start
+    return attempt
+
+
 def _try_newtalk_amp(url: str) -> LayerAttempt:
     """newtalk.tw 專用：使用 ?amp=1 端點，regex 萃取 Breadcrumb~延伸閱讀 之間的正文。"""
     attempt = LayerAttempt(method="newtalk-amp")
@@ -452,7 +526,8 @@ _LAYERS = [
 
 # Domain-specific 前置層（僅對指定 domain 優先嘗試）
 _DOMAIN_SPECIFIC_LAYERS: dict[str, list] = {
-    'newtalk.tw': [_try_newtalk_amp],
+    'newtalk.tw':     [_try_newtalk_amp],
+    'chinatimes.com': [_try_chinatimes_direct],
 }
 
 
