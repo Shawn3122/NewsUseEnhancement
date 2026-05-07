@@ -58,6 +58,7 @@ MAX_CONTENT_LENGTH = 49000
 # Jina Reader API（結尾斜線已確保）
 JINA_BASE_URL = "https://r.jina.ai/"
 JINA_API_KEY = os.environ.get("JINA_API_KEY", "")  # 選用，有 key 可提升配額
+JINA_DOMAIN_COOLDOWN = 3  # 同 domain 兩次 Jina 請求最小間隔（秒），避免觸發速率限制
 
 # =============================================================================
 # 狀態值定義

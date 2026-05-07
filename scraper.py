@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import traceback
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -19,6 +21,7 @@ import requests
 import trafilatura
 from trafilatura.settings import use_config
 import urllib3
+from curl_cffi import requests as cffi_requests
 
 import config
 import content_cleaner
@@ -29,6 +32,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # trafilatura 全域設定
 _trafil_config = use_config()
 _trafil_config.set("DEFAULT", "MIN_OUTPUT_SIZE", "50")
+
+# Jina 速率限制狀態（module-level，跨同一批次的 URL 共享）
+_jina_blocked_domains: dict[str, datetime] = {}  # domain → blocked_until (UTC)
+_jina_last_request: dict[str, float] = {}         # domain → last request timestamp
 
 
 # =============================================================================
@@ -140,18 +147,77 @@ def _is_valid_content(text: Optional[str], min_chars: int = 50) -> bool:
 # =============================================================================
 
 def _try_trafilatura_native(url: str) -> LayerAttempt:
-    """第 1 層：trafilatura 內建的 fetch + extract。"""
+    """第 1 層：requests 下載（bypass SSL）+ trafilatura extract。"""
     attempt = LayerAttempt(method="trafilatura")
     start = time.time()
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded is None:
-            attempt.error_type, attempt.error_detail = config.ERROR_EMPTY, "fetch_url 回傳 None"
+        resp = requests.get(
+            url,
+            headers=config.BROWSER_HEADERS,
+            timeout=config.TIMEOUT_TRAFILATURA,
+            verify=False,
+            allow_redirects=True,
+        )
+        attempt.http_status = resp.status_code
+
+        if resp.status_code != 200 or len(resp.text) < 500:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                http_status=resp.status_code,
+                response_headers=dict(resp.headers),
+                body_snippet=resp.text[:500],
+            )
             attempt.elapsed_sec = time.time() - start
             return attempt
 
         text = trafilatura.extract(
-            downloaded,
+            resp.text,
+            output_format="txt",
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+            config=_trafil_config,
+        )
+
+        if _is_valid_content(text):
+            attempt.success = True
+            attempt.text = text[:config.MAX_CONTENT_LENGTH]
+            attempt.char_count = len(text)
+        else:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                body_snippet=(text or "")[:500]
+            )
+
+    except Exception as e:
+        attempt.error_type, attempt.error_detail = _classify_error(e=e)
+
+    attempt.elapsed_sec = time.time() - start
+    return attempt
+
+
+def _try_curl_cffi(url: str) -> LayerAttempt:
+    """第 2 層：curl_cffi 模擬 Chrome TLS 指紋，繞過 Cloudflare WAF。"""
+    attempt = LayerAttempt(method="curl_cffi")
+    start = time.time()
+    try:
+        resp = cffi_requests.get(
+            url,
+            impersonate="chrome120",
+            timeout=config.TIMEOUT_REQUESTS,
+            allow_redirects=True,
+        )
+        attempt.http_status = resp.status_code
+
+        if resp.status_code != 200 or len(resp.text) < 500:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                http_status=resp.status_code,
+                response_headers=dict(resp.headers),
+                body_snippet=resp.text[:500],
+            )
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        text = trafilatura.extract(
+            resp.text,
             output_format="txt",
             include_comments=False,
             include_tables=True,
@@ -176,7 +242,7 @@ def _try_trafilatura_native(url: str) -> LayerAttempt:
 
 
 def _try_requests_trafilatura(url: str) -> LayerAttempt:
-    """第 2 層：自訂 headers 的 requests + trafilatura extract。"""
+    """第 3 層：自訂 headers 的 requests + trafilatura extract。"""
     attempt = LayerAttempt(method="requests+trafilatura")
     start = time.time()
     try:
@@ -228,13 +294,48 @@ def _try_jina_reader(url: str) -> LayerAttempt:
     attempt = LayerAttempt(method="jina")
     start = time.time()
     try:
+        domain = urlparse(url).netloc
+
+        # 檢查此 domain 是否仍在 Jina 封鎖期內，若是則直接跳過
+        if domain in _jina_blocked_domains:
+            blocked_until = _jina_blocked_domains[domain]
+            if datetime.now(timezone.utc) < blocked_until:
+                attempt.error_type = config.ERROR_BLOCKED
+                attempt.error_detail = f"Jina 封鎖此 domain 至 {blocked_until.strftime('%H:%M UTC')}，跳過請求"
+                attempt.elapsed_sec = time.time() - start
+                return attempt
+            else:
+                del _jina_blocked_domains[domain]
+
+        # per-domain rate limiting：同一 domain 請求間隔不得低於 JINA_DOMAIN_COOLDOWN
+        elapsed_since_last = time.time() - _jina_last_request.get(domain, 0)
+        if elapsed_since_last < config.JINA_DOMAIN_COOLDOWN:
+            time.sleep(config.JINA_DOMAIN_COOLDOWN - elapsed_since_last)
+
         jina_url = f"{config.JINA_BASE_URL}{url}"
-        headers = {"Accept": "text/plain", "X-No-Cache": "true"}
-        if config.JINA_API_KEY:
-            headers["Authorization"] = f"Bearer {config.JINA_API_KEY}"
+        headers = {"Accept": "text/plain"}
 
         resp = requests.get(jina_url, headers=headers, timeout=config.TIMEOUT_JINA)
+        _jina_last_request[domain] = time.time()
         attempt.http_status = resp.status_code
+
+        if resp.status_code == 451:
+            # Jina 451 = 速率限制（DDoS 保護），訊息含 "blocked until <time>"
+            match = re.search(r"blocked until (.+?) due to", resp.text)
+            if match:
+                try:
+                    blocked_until_str = match.group(1).strip().replace(" GMT", "")
+                    blocked_until = datetime.strptime(blocked_until_str, "%a %b %d %Y %H:%M:%S %z")
+                    _jina_blocked_domains[domain] = blocked_until
+                    detail = f"Jina 速率限制，封鎖至 {blocked_until.strftime('%H:%M UTC')}"
+                except Exception:
+                    detail = "Jina 速率限制 (HTTP 451)"
+            else:
+                detail = "Jina 速率限制 (HTTP 451)"
+            attempt.error_type = config.ERROR_BLOCKED
+            attempt.error_detail = detail
+            attempt.elapsed_sec = time.time() - start
+            return attempt
 
         if resp.status_code != 200:
             attempt.error_type, attempt.error_detail = _classify_error(
@@ -274,15 +375,85 @@ def _try_jina_reader(url: str) -> LayerAttempt:
 
 
 # =============================================================================
+# Domain-specific 萃取層
+# =============================================================================
+
+def _try_newtalk_amp(url: str) -> LayerAttempt:
+    """newtalk.tw 專用：使用 ?amp=1 端點，regex 萃取 Breadcrumb~延伸閱讀 之間的正文。"""
+    attempt = LayerAttempt(method="newtalk-amp")
+    start = time.time()
+    try:
+        resp = requests.get(
+            url + "?amp=1",
+            headers=config.BROWSER_HEADERS,
+            timeout=config.TIMEOUT_REQUESTS,
+            verify=False,
+            allow_redirects=True,
+        )
+        attempt.http_status = resp.status_code
+
+        if resp.status_code != 200:
+            attempt.error_type, attempt.error_detail = _classify_error(
+                http_status=resp.status_code,
+                response_headers=dict(resp.headers),
+            )
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        html = resp.text
+        # 移除 script/style 避免干擾段落解析
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL)
+
+        breadcrumb_idx = html.find('Breadcrumb')
+        extend_idx = html.find('延伸閱讀')
+
+        if breadcrumb_idx < 0 or extend_idx < 0 or extend_idx <= breadcrumb_idx:
+            attempt.error_type = config.ERROR_EMPTY
+            attempt.error_detail = "找不到 Breadcrumb/延伸閱讀 結構"
+            attempt.elapsed_sec = time.time() - start
+            return attempt
+
+        article_html = html[breadcrumb_idx:extend_idx]
+        paragraphs = []
+        noise_keywords = ['功能選單', '導航選單', '提醒', '搜尋', '分享', 'Loading']
+        for p in re.findall(r'<p[^>]*>(.*?)</p>', article_html, re.DOTALL):
+            text = re.sub(r'&nbsp;', ' ', re.sub(r'<[^>]+>', '', p)).strip()
+            if len(text) >= 30 and not any(k in text for k in noise_keywords):
+                paragraphs.append(text)
+
+        content = "\n".join(paragraphs)
+        if _is_valid_content(content):
+            attempt.success = True
+            attempt.text = content[:config.MAX_CONTENT_LENGTH]
+            attempt.char_count = len(content)
+        else:
+            attempt.error_type = config.ERROR_EMPTY
+            attempt.error_detail = f"段落萃取結果過短（{len(content)} 字）"
+
+    except Exception as e:
+        attempt.error_type, attempt.error_detail = _classify_error(e=e)
+
+    attempt.elapsed_sec = time.time() - start
+    return attempt
+
+
+# =============================================================================
 # 主要擷取函式
 # =============================================================================
 
-# 擷取層順序
+# 通用擷取層（所有 URL 都會嘗試）
 _LAYERS = [
-    _try_trafilatura_native,
-    _try_requests_trafilatura,
-    _try_jina_reader,
+    _try_trafilatura_native,   # Layer 1: requests + trafilatura（輕量）
+    _try_curl_cffi,            # Layer 2: curl_cffi Chrome 指紋（繞 Cloudflare）
+    _try_requests_trafilatura, # Layer 3: requests + browser headers（備援）
+    _try_jina_reader,          # Layer 4: Jina Reader（SPA/JS 備援）
 ]
+
+# Domain-specific 前置層（僅對指定 domain 優先嘗試）
+_DOMAIN_SPECIFIC_LAYERS: dict[str, list] = {
+    'newtalk.tw': [_try_newtalk_amp],
+}
 
 
 def scrape_url(url: str) -> ScrapeResult:
@@ -296,7 +467,10 @@ def scrape_url(url: str) -> ScrapeResult:
     domain = urlparse(url).netloc
     result = ScrapeResult(url=url, domain=domain)
 
-    for layer_fn in _LAYERS:
+    prefix = next((v for k, v in _DOMAIN_SPECIFIC_LAYERS.items() if k in domain), [])
+    layers = prefix + list(_LAYERS)
+
+    for layer_fn in layers:
         attempt = layer_fn(url)
         result.attempts.append(attempt)
 
